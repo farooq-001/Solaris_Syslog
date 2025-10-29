@@ -1,261 +1,182 @@
-#!/bin/bash
-##################
-##Check root user#
-##################
-if [ "$USER" != "root" ]; then
+#!/usr/bin/env bash
+
+#################
+#check root user#
+#################
+if [ "$(id -u)" -ne 0 ]; then
     echo ""
-    echo 'Invalid User!!! Please login as root and rerun the script.'
+    echo 'Invalid User!!! Please run the script as root.'
     echo ""
-    exit 0
+    exit 1
 fi
+
 ########################
-##Check Internet access#
+# Check Internet access #
 ########################
-echo -n "Checking for Internet access..."
-IP=$(curl -s ipinfo.io/ip 2> /dev/null)
-if [[ $? -eq 0 ]]; then
+echo -n "Checking for Internet access... "
+IP=$(curl -s --max-time 5 ipinfo.io/ip 2>/dev/null)
+if [[ $? -eq 0 && -n "$IP" ]]; then
     echo "Online."
     echo ""
 else
-    echo " Offline."
+    echo "Offline."
     echo ""
-    echo "Check internet access and rerun script. Terminating Script!"
+    echo "Check internet access and rerun the script. Terminating!"
     exit 1
 fi
+
 echo "#########################"
 echo "# Detect OS and version #"
 echo "#########################"
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     OS=$ID
-    VERSION_ID=$VERSION_ID
+    # VERSION_ID is already sourced; no need to reassign it
     OS_FLAVOR="$PRETTY_NAME"
 else
     echo "Cannot detect OS. /etc/os-release not found."
     exit 1
 fi
+
 echo "Detected OS: $OS_FLAVOR"
-# Check rsyslog and auditd services
-for svc in rsyslog auditd; do
-    if ! systemctl list-unit-files | grep -q "^${svc}.service"; then
-        echo "$svc service not available. Will install."
-    else
-        echo "$svc service available."
-    fi
-done
-# Install or update for RPM-based systems (Rocky, RHEL, CentOS, Amazon Linux, Oracle Linux)
-install_rpm() {
-    local pkg_manager=$1
-    echo "Installing rsyslog, audit, sendmail, wget..."
-    $pkg_manager install rsyslog audit sendmail wget -y
-    echo "Starting services..."
-    systemctl enable rsyslog auditd sendmail
-    systemctl start rsyslog auditd sendmail
-}
-# Install or update for Ubuntu
-install_ubuntu() {
-    echo "Installing rsyslog, auditd, sendmail, wget..."
-    apt install rsyslog auditd sendmail wget -y
-    echo "Starting services..."
-    systemctl enable rsyslog auditd sendmail
-    systemctl start rsyslog auditd sendmail
-}
-# Handle OS cases
-case $OS in
-    rocky|rhel|centos|amzn|ol)
-        if [ "$OS" = "amzn" ] && [ "${VERSION_ID:0:1}" = "2" ] || [ "$OS" = "centos" ] && [[ "$VERSION_ID" =~ ^7 ]]; then
-            install_rpm yum
-        else
-            install_rpm dnf
-        fi
-        ;;
-    ubuntu)
-        install_ubuntu
-        ;;
+
+# Initialize IP variable from command line argument
+ip=""
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -ip)
+      if [[ -n $2 ]]; then
+        ip="$2"
+        shift 2
+      else
+        echo "Error: -ip requires an IP address argument."
+        exit 1
+      fi
+      ;;
     *)
-        echo "Unsupported OS: $OS_FLAVOR"
-        exit 1
-        ;;
-esac
-
-##############################
-# Ensure wget is installed    #
-##############################
-if ! command -v wget >/dev/null 2>&1; then
-    echo "wget not found, installing wget..."
-    if [[ "$OS" == "rhel" || "$OS" == "centos" || "$OS" == "rocky" || "$OS" == "amzn" || "$OS" == "ol" ]]; then
-        if command -v dnf >/dev/null 2>&1; then
-            dnf install -y wget
-        else
-            yum install -y wget
-        fi
-    elif [[ "$OS" == "ubuntu" ]]; then
-        apt install -y wget
-    else
-        echo "Unsupported OS for wget installation"
-        exit 1
-    fi
-fi
-echo
-
-######################
-# Parse -ip argument #
-######################
-while [[ "$#" -gt 0 ]]; do
-  case $1 in
-    -ip) LOG_COLLECTOR_IP="$2"; shift 2 ;;
-    *) echo "Unknown parameter passed: $1"; exit 1 ;;
+      echo "Unknown option: $1"
+      echo "Usage: $0 -ip <IP_ADDRESS>"
+      exit 1
+      ;;
   esac
 done
-if [[ -z "$LOG_COLLECTOR_IP" ]]; then
-  echo "Usage: $0 -ip <LOG_COLLECTOR_IP>"
+
+# Check if required IP parameter is provided
+if [[ -z "$ip" ]]; then
+  echo "Error: IP address is required."
+  echo "Usage: $0 -ip <IP_ADDRESS>"
   exit 1
 fi
-##############################
-# Paths to config files, backup
-##############################
+
+echo "Using IP address: $ip"
+
+# Check if rsyslog is installed; Solaris pkg commands differ
+if ! pkg list rsyslog >/dev/null 2>&1; then
+  echo "rsyslog not installed. Installing now via pkg..."
+  # Install with auto confirmation; handle failure
+  if ! pkg install -y system/rsyslog; then
+    echo "Failed to install rsyslog. Please install manually."
+    exit 1
+  fi
+else
+  echo "rsyslog is already installed."
+fi
+
+# Backup existing config file if it exists
 RSYSLOG_CONF="/etc/rsyslog.d/50-blusapphire-log-forward.conf"
-AUDIT_RULES="/etc/audit/rules.d/audit.rules"
-AUDIT_CONF="/etc/audit/auditd.conf"
-BACKUP_DIR="/tmp"
+CKUP_DIR="/tmp"
 TS=$(date +%Y%m%d-%H%M%S)
-# Move existing files to /tmp with timestamp if they exist
-[[ -f "$RSYSLOG_CONF" ]] && mv "$RSYSLOG_CONF" "$BACKUP_DIR/50-blusapphire-log-forward.conf.$TS"
-[[ -f "$AUDIT_RULES" ]] && mv "$AUDIT_RULES" "$BACKUP_DIR/audit.rules.$TS"
-[[ -f "$AUDIT_CONF" ]] && mv "$AUDIT_CONF" "$BACKUP_DIR/auditd.conf.$TS"
-# Download files quietly
-wget -q -c https://prod1-us.blusapphire.net/export/install/beat/rsyslog_config/rsyslog/50-blusapphire-log-forward.conf -O "$RSYSLOG_CONF"
-wget -q -c https://prod1-us.blusapphire.net/export/install/beat/rsyslog_config/auditd/audit.rules -O "$AUDIT_RULES"
-wget -q -c https://prod1-us.blusapphire.net/export/install/beat/rsyslog_config/auditd/auditd.conf -O "$AUDIT_CONF"
-if [[ ! -f "$RSYSLOG_CONF" ]]; then
-  echo "Config file $RSYSLOG_CONF does not exist after download."
-  exit 1
-fi
-# Replace <LOG_COLLECTOR_IP> quietly
-sed -i "s|<LOG_COLLECTOR_IP>|$LOG_COLLECTOR_IP|g" "$RSYSLOG_CONF"
-echo "Config Files Updated successfully."
-echo "1.$RSYSLOG_CONF"
-echo "2.$AUDIT_RULES"
-echo "3.$AUDIT_CONF"
-echo ""
-echo "[+] Restarting services..."
-systemctl restart rsyslog
-kill -9 $(systemctl show -p MainPID --value auditd.service)
-systemctl restart auditd
-if [ $? -eq 4 ]; then
-    service auditd reload
-    pint=$?
-    echo "Reload command exit code: $pint"
-    echo "print value: $pint"
-fi
-echo "[+] Checking service status..."
-systemctl is-active --quiet auditd && echo "[OK] auditd is running"
-systemctl is-active --quiet rsyslog && echo "[OK] rsyslog is running"
 
-###############################################
-# SELinux config for RHEL and CentOS Stream 10
-###############################################
-if [[ "$OS" == "rhel" || "$OS" == "centos" ]]; then
-    echo "[+] Applying RHEL/CentOS-specific SELinux policy for rsyslog..."
-    dnf install -y policycoreutils-python-utils
-    ausearch -m avc -c rsyslogd --raw | audit2allow -M rsyslog_audit_access
-    semodule -i rsyslog_audit_access.pp
-    semanage permissive -a syslogd_t
-    systemctl restart rsyslog
+if [[ -f "$RSYSLOG_CONF" ]]; then
+    mv "$RSYSLOG_CONF" "$CKUP_DIR/50-blusapphire-log-forward.conf.$TS"
 fi
 
-########################################
-# Check if the OS is Ubuntu
-########################################
-if [ "$OS" = "ubuntu" ]; then
-    echo "Ubuntu detected. Running AppArmor update script..."
+# Write rsyslog configuration with given IP
+cat <<EOF > "$RSYSLOG_CONF"
+####################################################################
+# BluSapphire - Rsyslog Configuration for Syslog, Audit Forwarding
+#
+# Note: This configuration uses legacy syntax compatible with 
+#       rsyslog versions 3.x, 4.x, and 5.x (pre-6.0).
+####################################################################
+#### Modules and Work Directory ####
+#\$ModLoad imfile
+module(load="imuxsock")
+#\$WorkDirectory /var/lib/rsyslog
+\$WorkDirectory /var/spool/rsyslog
 
-    # Define the AppArmor profile file
-    APPARMOR_PROFILE="/etc/apparmor.d/usr.sbin.rsyslogd"
+#### TEMPLATES ####
+# Syslog template (all non-audit logs)
+\$template SyslogRFC5424Format,"<%PRI%>%protocol-version% %TIMESTAMP:::date-rfc3339% %HOSTNAME% %APP-NAME% %PROCID% %MSGID% [log type=\"linux_syslog\"] %msg%\n"
+# Audit template (audit logs from /var/log/audit/audit.log)
+#\$template AuditRFC5424Format,"<%PRI%>%protocol-version% %TIMESTAMP:::date-rfc3339% %HOSTNAME% %APP-NAME% %PROCID% %MSGID% [log type=\"linux_auditd\"] %msg%\n"
 
-    # Check if the AppArmor profile file exists
-    if [[ ! -f "$APPARMOR_PROFILE" ]]; then
-      echo "Error: AppArmor profile $APPARMOR_PROFILE does not exist."
-      exit 1
-    fi
+#### AUDIT LOG FORWARDER ####
+# Monitor audit log file
+#\$InputFileName /var/log/audit/audit.log
+#\$InputFileTag auditd:
+#\$InputFileStateFile audit_log_state
+#\$InputFileSeverity info
+#\$InputFileFacility local6
+#\$InputFilePollInterval 1
+#\$InputRunFileMonitor
 
-    # Find all log files under /var/log/
-    find /var/log/ -type f -name "*.log" | while read -r logfile; do
-      echo "Processing $logfile..."
+# Queue for audit forwarding
+#\$ActionQueueType LinkedList
+#\$ActionQueueFileName audit_fwd
+#\$ActionQueueMaxDiskSpace 1g
+#\$ActionQueueSaveOnShutdown on
 
-      # Check if the log file path is already in the AppArmor profile
-      if grep -Fx "  $logfile r," "$APPARMOR_PROFILE" > /dev/null; then
-        echo "  $logfile is already in $APPARMOR_PROFILE, skipping..."
-      else
-        # Add the log file path to the AppArmor profile
-        echo "Adding $logfile to $APPARMOR_PROFILE..."
-        sed -i "/# 'r' is needed when using imfile/a \  $logfile r," "$APPARMOR_PROFILE"
-      fi
-    done
+# Forward audit logs
+## TCP forwarding (uncomment if required)
+#local6.* @@${ip}:12513;AuditRFC5424Format
+## UDP forwarding (uncomment if required)
+#local6.* @${ip}:12513;AuditRFC5424Format
 
-    # Reload the AppArmor profile
-    echo "Reloading AppArmor profile..."
-    apparmor_parser -r "$APPARMOR_PROFILE"
+#### SYSLOG FORWARDER ####
+# Queue for syslog forwarding
+\$ActionQueueType LinkedList
+\$ActionQueueFileName syslog_fwd
+\$ActionQueueMaxDiskSpace 1g
+\$ActionQueueSaveOnShutdown on
 
-    # Reload system daemons
-    echo "Reloading system daemons..."
-    systemctl daemon-reload
+# Forward all non-audit/syslog messages to port 12514
+# Exclude auditd program and messages containing "audit" to prevent duplication
+#:programname, isequal, "auditd"     ~
+#:msg, contains, "audit"              ~
 
-    # Reload the AppArmor service
-    echo "Reloading AppArmor service..."
-    systemctl reload apparmor
+# Forward syslog logs
+## TCP forwarding (uncomment if required)
+#*.* @@${ip}:12514;SyslogRFC5424Format
+## UDP forwarding (uncomment if required)
+*.* @${ip}:12514;SyslogRFC5424Format
 
-    # Modify /etc/audit/auditd.conf to change log_group
-    AUDIT_CONF="/etc/audit/auditd.conf"
-    if [[ -f "$AUDIT_CONF" ]]; then
-        echo "Modifying $AUDIT_CONF..."
-        sed -i 's/log_group = root/log_group = adm/' "$AUDIT_CONF"
-    else
-        echo "Error: $AUDIT_CONF does not exist."
-        exit 1
-    fi
+EOF
 
-    # Modify /etc/rsyslog.d/50-blusapphire-log-forward.conf to uncomment WorkDirectory
-    RSYSLOG_CONF="/etc/rsyslog.d/50-blusapphire-log-forward.conf"
-    if [[ -f "$RSYSLOG_CONF" ]]; then
-        echo "Modifying $RSYSLOG_CONF..."
-        sed -i 's/#$WorkDirectory \/var\/spool\/rsyslog/$WorkDirectory \/var\/spool\/rsyslog/' "$RSYSLOG_CONF"
-    else
-        echo "Error: $RSYSLOG_CONF does not exist."
-        exit 1
-    fi
+echo "Rsyslog configuration updated at $RSYSLOG_CONF."
 
-    # Add syslog user to adm group
-    echo "Adding syslog user to adm group..."
-    usermod -aG adm syslog
-    
-    # Create /var/log/audit directory if it doesn't exist
-    echo "Creating /var/log/audit directory..."
-    mkdir -p /var/log/audit    /var/lib/rsyslog
-      
-    # Set ownership and permissions for /var/log/audit
-    echo "Setting ownership and permissions for /var/log/audit..."
-    chown root:adm /var/log/audit
-    chmod 750 /var/log/audit
+sleep 5
+# Disable default system log and enable rsyslog service
+echo "Disabling default system log service..."
+svcadm disable svc:/system/system-log:default
+echo "Enabling rsyslog service..."
+svcadm enable svc:/system/system-log:rsyslog
+echo "Clearing rsyslog service fault status..."
+svcadm clear svc:/system/system-log:rsyslog
 
-    # Set permissions and group for /var/log/audit/audit.log
-    if [[ -f "/var/log/audit/audit.log" ]]; then
-        echo "Setting permissions and group for /var/log/audit/audit.log..."
-        chmod 640 /var/log/audit/audit.log
-        chgrp adm /var/log/audit/audit.log
-    else
-        echo "Warning: /var/log/audit/audit.log does not exist, skipping permissions and group change."
-    fi
+# Check rsyslog service status
+svcs system-log:rsyslog
 
-    # Restart rsyslog and auditd services
-    echo "Restarting rsyslog and auditd services..."
-    systemctl restart rsyslog auditd.service
+echo "Restarting rsyslog service..."
+svcadm restart svc:/system/system-log:rsyslog
 
-    echo "Script completed successfully."
-fi
+echo "Refreshing rsyslog service..."
+svcadm refresh svc:/system/system-log:rsyslog
 
+# Final rsyslog service status
+svcs system-log:rsyslog
 
-echo "########################################"
-echo "[+] Configuration applied successfully."
-echo "########################################"
-
+echo "Script completed successfully."
+exit 0
