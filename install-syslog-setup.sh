@@ -85,21 +85,22 @@ else
 fi
 
 # Backup existing config file if it exists
-RSYSLOG_CONF="/etc/rsyslog.d/50-blusapphire-log-forward.conf"
+RSYSLOG_CONF="/etc/rsyslog.d/50-rsyslog-log-forward.conf"
 CKUP_DIR="/tmp"
 TS=$(date +%Y%m%d-%H%M%S)
 
 if [[ -f "$RSYSLOG_CONF" ]]; then
-    mv "$RSYSLOG_CONF" "$CKUP_DIR/50-blusapphire-log-forward.conf.$TS"
+    mv "$RSYSLOG_CONF" "$CKUP_DIR/50-rsyslog-log-forward.conf.$TS"
 fi
 
 # Write rsyslog configuration with given IP
 cat <<EOF > "$RSYSLOG_CONF"
 ####################################################################
-# BluSapphire - Rsyslog Configuration for Syslog, Audit Forwarding
-#
+# Rsyslog Configuration for Syslog, Audit Forwarding
 # Note: This configuration uses legacy syntax compatible with 
-#       rsyslog versions 3.x, 4.x, and 5.x (pre-6.0).
+# rsyslog versions 3.x, 4.x, and 5.x (pre-6.0).
+## Author: SNB-TECH
+## Created: 30/10/2025
 ####################################################################
 #### Modules and Work Directory ####
 #\$ModLoad imfile
